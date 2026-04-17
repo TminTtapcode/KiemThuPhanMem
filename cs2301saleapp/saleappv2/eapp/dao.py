@@ -1,16 +1,18 @@
 from sqlalchemy.exc import IntegrityError
 
-from eapp.models import Category, Product, User
+from eapp.models import Category, Product, User, Receipt, ReceiptDetails
 import hashlib
-from eapp import  db
+from eapp import app, db
 import cloudinary.uploader
-from flask import current_app
-import re
+from flask_login import current_user
+from sqlalchemy import func
+from datetime import datetime
+
 
 def load_categories():
     return Category.query.all()
 
-def load_products(cate_id=None, kw=None, page=None):
+def load_products(cate_id=None, kw=None, page=1):
     query = Product.query
 
     if kw:
@@ -20,8 +22,8 @@ def load_products(cate_id=None, kw=None, page=None):
         query = query.filter(Product.category_id.__eq__(cate_id))
 
     if page:
-        start = (page - 1) * current_app.config['PAGE_SIZE']
-        query = query.slice(start, start + current_app.config['PAGE_SIZE'])
+        start = (page - 1) * app.config['PAGE_SIZE']
+        query = query.slice(start, start + app.config['PAGE_SIZE'])
 
     return query.all()
 
@@ -39,17 +41,6 @@ def auth_user(username, password):
                              User.password==password).first()
 
 def add_user(name, username, password, avatar):
-    if len(username.strip()) <5 :
-        raise ValueError("user phai toi thieu 5 ky tu")
-    if len(password.strip()) <8 :
-        raise ValueError("Mat khau phai toi thieu 8 ky tu")
-    if  not re.search(r'[0-9]',password.strip()):
-        raise ValueError("Mat khau phai chua Ky so")
-    if not re.search(r'[a-zA-Z]',password.strip()):
-        raise ValueError('Mat khau phai chua ky tu')
-    if User.query.filter(User.username.__eq__(username.strip())).first():
-        raise ValueError('User name da ton tai')
-
     password = str(hashlib.md5(password.strip().encode('utf-8')).hexdigest())
     u = User(name=name.strip(), username=username.strip(), password=password)
     if avatar:
@@ -62,4 +53,43 @@ def add_user(name, username, password, avatar):
     except IntegrityError:
         db.session.rollback()
         raise Exception('Username đã tồn tại!')
+
+
+def add_receipt(cart):
+    if cart:
+        r = Receipt(user=current_user)
+        db.session.add(r)
+
+        for c in cart.values():
+            d = ReceiptDetails(quantity=c['quantity'], price=c['price'], product_id=c['id'], receipt=r)
+            db.session.add(d)
+
+        db.session.commit()
+
+
+def revenue_by_product(kw=None):
+    query = (db.session.query(Product.id, Product.name, func.sum(ReceiptDetails.quantity * ReceiptDetails.price))
+             .join(ReceiptDetails, ReceiptDetails.product_id==Product.id, isouter=True))
+
+    if kw:
+        query = query.filter(Product.name.contains(kw))
+
+    return query.group_by(Product.id).all()
+
+
+def revenue_by_time(time="month", year=datetime.now().year):
+    query = (db.session.query(func.extract(time, Receipt.created_date), func.sum(ReceiptDetails.quantity * ReceiptDetails.price))
+             .join(ReceiptDetails, ReceiptDetails.receipt_id==Receipt.id)).filter(func.extract('year', Receipt.created_date)==year)
+
+    return query.group_by(func.extract(time, Receipt.created_date)).all()
+
+
+def count_product_by_cate():
+    return (db.session.query(Category.id, Category.name, func.count(Product.id))
+            .join(Product, Product.category_id==Category.id, isouter=True).group_by(Category.id).all())
+
+
+if __name__ == '__main__':
+    with app.app_context():
+        print(count_product_by_cate())
 
